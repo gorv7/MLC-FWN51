@@ -69,23 +69,18 @@
 static volatile uint8_t xdata rx_buffer[RX_BUFFER_SIZE];
 static volatile uint8_t rx_head = 0;
 static volatile uint8_t rx_tail = 0;
-static volatile uint8_t rx_overflow_cnt = 0;  /* Overflow counter for diagnostics */
 
 /* Frame parsing state - use XDATA */
 static uint8_t frame_state = FRAME_IDLE;
 static uint8_t xdata frame_buffer[MAX_FRAME_LEN];
 static uint8_t frame_idx = 0;
 static uint8_t frame_len = 0;
-static uint16_t frame_timeout_cnt = 0;        /* Timeout counter */
+static uint16_t frame_timeout_cnt = 0;
 
 /* Parsed frame data */
 static volatile bit g_frame_ready = 0;
 static volatile uint16_t g_frame_addr = 0;
 static volatile uint16_t g_frame_value = 0;
-
-/* Communication statistics */
-static uint16_t g_frame_rx_count = 0;         /* Successful frames received */
-static uint8_t g_frame_error_count = 0;       /* Frame errors (timeout/invalid) */
 
 /*===========================================================================*/
 /* PWM Configuration                                                          */
@@ -150,11 +145,6 @@ void UART0_ISR(void) interrupt 4
             rx_buffer[rx_head] = SBUF;
             rx_head = next_head;
         }
-        else
-        {
-            /* Buffer overflow - track for diagnostics */
-            rx_overflow_cnt++;
-        }
         RI = 0;
     }
     
@@ -204,7 +194,6 @@ static void process_DWIN_Frames(void)
         if (frame_timeout_cnt > 5000)  /* ~50ms at typical main loop speed */
         {
             reset_frame_parser();
-            if (g_frame_error_count < 255) g_frame_error_count++;
         }
     }
     
@@ -254,7 +243,6 @@ static void process_DWIN_Frames(void)
                 else
                 {
                     reset_frame_parser();
-                    if (g_frame_error_count < 255) g_frame_error_count++;
                 }
                 break;
                 
@@ -263,7 +251,6 @@ static void process_DWIN_Frames(void)
                 if (frame_idx >= MAX_FRAME_LEN)
                 {
                     reset_frame_parser();
-                    if (g_frame_error_count < 255) g_frame_error_count++;
                     break;
                 }
                 
@@ -280,7 +267,6 @@ static void process_DWIN_Frames(void)
                         {
                             g_frame_value = ((uint16_t)frame_buffer[7] << 8) | frame_buffer[8];
                             g_frame_ready = 1;
-                            g_frame_rx_count++;
                         }
                     }
                     reset_frame_parser();
