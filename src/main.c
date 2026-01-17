@@ -50,6 +50,8 @@
 /*===========================================================================*/
 #define RX_BUFFER_SIZE      32      /* Ring buffer size (power of 2) */
 #define RX_BUFFER_MASK      (RX_BUFFER_SIZE - 1)
+#define FRAME_TIMEOUT_MS    50      /* Max time to receive complete frame */
+#define MAX_FRAME_LEN       12      /* Maximum expected DWIN frame length */
 
 #define DWIN_HEADER_H       0x5A
 #define DWIN_HEADER_L       0xA5
@@ -67,17 +69,23 @@
 static volatile uint8_t xdata rx_buffer[RX_BUFFER_SIZE];
 static volatile uint8_t rx_head = 0;
 static volatile uint8_t rx_tail = 0;
+static volatile uint8_t rx_overflow_cnt = 0;  /* Overflow counter for diagnostics */
 
 /* Frame parsing state - use XDATA */
 static uint8_t frame_state = FRAME_IDLE;
-static uint8_t xdata frame_buffer[12];
+static uint8_t xdata frame_buffer[MAX_FRAME_LEN];
 static uint8_t frame_idx = 0;
 static uint8_t frame_len = 0;
+static uint16_t frame_timeout_cnt = 0;        /* Timeout counter */
 
 /* Parsed frame data */
 static volatile bit g_frame_ready = 0;
 static volatile uint16_t g_frame_addr = 0;
 static volatile uint16_t g_frame_value = 0;
+
+/* Communication statistics */
+static uint16_t g_frame_rx_count = 0;         /* Successful frames received */
+static uint8_t g_frame_error_count = 0;       /* Frame errors (timeout/invalid) */
 
 /*===========================================================================*/
 /* PWM Configuration                                                          */
@@ -123,6 +131,7 @@ static void writeVP(uint16_t address, uint16_t value);
 static void setPage(uint8_t page);
 static void writeScr(uint8_t value);
 static void process_IR(void);
+static void reset_frame_parser(void);
 static void process_DWIN_Frames(void);
 static void handle_DWIN_VP(uint16_t address, uint16_t value);
 
@@ -140,6 +149,11 @@ void UART0_ISR(void) interrupt 4
         {
             rx_buffer[rx_head] = SBUF;
             rx_head = next_head;
+        }
+        else
+        {
+            /* Buffer overflow - track for diagnostics */
+            rx_overflow_cnt++;
         }
         RI = 0;
     }
@@ -168,15 +182,37 @@ static uint8_t rx_read(void)
 }
 
 /*===========================================================================*/
-/* DWIN Frame Parser                                                          */
+/* DWIN Frame Parser with Timeout Protection                                  */
 /*===========================================================================*/
+static void reset_frame_parser(void)
+{
+    frame_state = FRAME_IDLE;
+    frame_idx = 0;
+    frame_len = 0;
+    frame_timeout_cnt = 0;
+}
+
 static void process_DWIN_Frames(void)
 {
     uint8_t byte;
+    uint8_t had_data = 0;
+    
+    /* Timeout check - reset parser if stuck mid-frame */
+    if (frame_state != FRAME_IDLE)
+    {
+        frame_timeout_cnt++;
+        if (frame_timeout_cnt > 5000)  /* ~50ms at typical main loop speed */
+        {
+            reset_frame_parser();
+            if (g_frame_error_count < 255) g_frame_error_count++;
+        }
+    }
     
     while (rx_available())
     {
         byte = rx_read();
+        had_data = 1;
+        frame_timeout_cnt = 0;  /* Reset timeout on data */
         
         switch (frame_state)
         {
@@ -197,48 +233,62 @@ static void process_DWIN_Frames(void)
                 }
                 else if (byte == DWIN_HEADER_H)
                 {
+                    /* Possible new frame start - restart */
                     frame_idx = 0;
                     frame_buffer[frame_idx++] = byte;
                 }
                 else
                 {
-                    frame_state = FRAME_IDLE;
+                    reset_frame_parser();
                 }
                 break;
                 
             case FRAME_GOT_A5:
                 frame_len = byte;
                 frame_buffer[frame_idx++] = byte;
-                if (frame_len > 0 && frame_len <= 9)
+                /* Validate length: min 3 (cmd + addr), max 9 for our use */
+                if (frame_len >= 3 && frame_len <= 9)
                 {
                     frame_state = FRAME_RECEIVING;
                 }
                 else
                 {
-                    frame_state = FRAME_IDLE;
+                    reset_frame_parser();
+                    if (g_frame_error_count < 255) g_frame_error_count++;
                 }
                 break;
                 
             case FRAME_RECEIVING:
+                /* Buffer overflow protection */
+                if (frame_idx >= MAX_FRAME_LEN)
+                {
+                    reset_frame_parser();
+                    if (g_frame_error_count < 255) g_frame_error_count++;
+                    break;
+                }
+                
                 frame_buffer[frame_idx++] = byte;
                 if (frame_idx >= (3 + frame_len))
                 {
+                    /* Complete frame received */
                     uint8_t cmd = frame_buffer[3];
                     if (cmd == DWIN_CMD_READ_RESP || cmd == DWIN_CMD_WRITE)
                     {
                         g_frame_addr = ((uint16_t)frame_buffer[4] << 8) | frame_buffer[5];
+                        /* For auto-upload: 5A A5 Len Cmd AddrH AddrL Count DataH DataL */
                         if (frame_len >= 5)
                         {
                             g_frame_value = ((uint16_t)frame_buffer[7] << 8) | frame_buffer[8];
                             g_frame_ready = 1;
+                            g_frame_rx_count++;
                         }
                     }
-                    frame_state = FRAME_IDLE;
+                    reset_frame_parser();
                 }
                 break;
                 
             default:
-                frame_state = FRAME_IDLE;
+                reset_frame_parser();
                 break;
         }
     }
@@ -627,7 +677,6 @@ void main(void)
     
     while (1)
     {
-        process_IR();
-        process_DWIN_Frames();
+        process_IR();        process_DWIN_Frames();
     }
-}
+}   
