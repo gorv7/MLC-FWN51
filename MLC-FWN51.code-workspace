@@ -1,0 +1,36 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "files.associations": {
+            "*.h": "c",
+            "*.c": "c",
+            "*.a51": "asm",
+            "*.A51": "asm"
+        },
+        "C_Cpp.default.compilerPath": "",
+        "C_Cpp.default.intelliSenseMode": "gcc-x86",
+        "C_Cpp.default.includePath": [
+            "${workspaceFolder}/include"
+        ],
+        "C_Cpp.default.defines": [
+            "MS51FB9AE",
+            "FOSC_24MHZ",
+            "__C51__"
+        ],
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "files.encoding": "utf8"
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-vscode.cpptools",
+            "marus25.cortex-debug"
+        ]
+    }
+}

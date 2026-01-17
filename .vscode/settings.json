@@ -1,0 +1,16 @@
+{
+    "editor.formatOnSave": true,
+    "C_Cpp.clang_format_fallbackStyle": "{ BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 120 }",
+    "files.exclude": {
+        "**/*.o": true,
+        "**/*.lst": true,
+        "**/*.obj": true,
+        "**/*.m51": true,
+        "**/Objects": true,
+        "**/Listings": true
+    },
+    "search.exclude": {
+        "**/Objects": true,
+        "**/Listings": true
+    }
+}

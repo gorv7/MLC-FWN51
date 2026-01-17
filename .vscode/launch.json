@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug MS51FB9AE (Nu-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "executable": "${workspaceFolder}/Objects/MLC-FWN51",
+            "device": "MS51FB9AE",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "raw",
+            "preLaunchTask": "Build with Keil C51"
+        }
+    ]
+}

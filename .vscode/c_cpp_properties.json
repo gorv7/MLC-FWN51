@@ -1,0 +1,39 @@
+{
+    "configurations": [
+        {
+            "name": "MS51FB9AE (Keil C51)",
+            "includePath": [
+                "${workspaceFolder}/include/**",
+                "${workspaceFolder}/src/**",
+                "${workspaceFolder}/Library/Device/Include/**",
+                "${workspaceFolder}/Library/StdDriver/inc/**"
+            ],
+            "defines": [
+                "MS51FB9AE",
+                "FOSC_24MHZ",
+                "__C51__"
+            ],
+            "compilerPath": "",
+            "cStandard": "c99",
+            "intelliSenseMode": "gcc-x86"
+        },
+        {
+            "name": "MS51FB9AE (SDCC)",
+            "includePath": [
+                "${workspaceFolder}/include/**",
+                "${workspaceFolder}/src/**",
+                "${workspaceFolder}/Library/Device/Include/**",
+                "${workspaceFolder}/Library/StdDriver/inc/**"
+            ],
+            "defines": [
+                "MS51FB9AE",
+                "FOSC_24MHZ",
+                "__SDCC"
+            ],
+            "compilerPath": "",
+            "cStandard": "c99",
+            "intelliSenseMode": "gcc-x86"
+        }
+    ],
+    "version": 4
+}

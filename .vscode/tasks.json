@@ -1,0 +1,31 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build with Keil C51",
+            "type": "shell",
+            "command": "echo",
+            "args": [
+                "Configure Keil uVision project for MS51FB9AE build. Import source files from src/, lib/, and include/ folders."
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Build project using Keil C51 compiler"
+        },
+        {
+            "label": "Clean Build",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-Command",
+                "Remove-Item -Path '${workspaceFolder}/Objects/*' -Force -ErrorAction SilentlyContinue; Remove-Item -Path '${workspaceFolder}/Listings/*' -Force -ErrorAction SilentlyContinue; Write-Host 'Build artifacts cleaned.'"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Clean all build artifacts"
+        }
+    ]
+}
