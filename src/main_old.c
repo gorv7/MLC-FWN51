@@ -42,19 +42,20 @@
 #define ADDR_CCT            0x1200
 #define ADDR_MEMONE         0x1300
 #define ADDR_MEMTWO         0x1400
-#define ADDR_ENDO_MAX       0x1600
+#define ADDR_ENDO           0x1600
+#define ADDR_MAX            0x1600
 #define ADDR_SCR            0x2000
 
 /*===========================================================================*/
 /* DWIN Frame Processing - Ring Buffer for UART RX                            */
 /*===========================================================================*/
-#define RX_BUFFER_SIZE      32      /* Ring buffer size (power of 2) */
+#define RX_BUFFER_SIZE      32      /* Ring buffer size (power of 2 for efficiency) */
 #define RX_BUFFER_MASK      (RX_BUFFER_SIZE - 1)
 
 #define DWIN_HEADER_H       0x5A
 #define DWIN_HEADER_L       0xA5
-#define DWIN_CMD_WRITE      0x82
-#define DWIN_CMD_READ_RESP  0x83
+#define DWIN_CMD_WRITE      0x82    /* Write VP command */
+#define DWIN_CMD_READ_RESP  0x83    /* Read VP response */
 
 /* DWIN frame states */
 #define FRAME_IDLE          0
@@ -63,18 +64,18 @@
 #define FRAME_GOT_LEN       3
 #define FRAME_RECEIVING     4
 
-/* Ring buffer for UART RX - use XDATA to save DATA space */
-static volatile uint8_t xdata rx_buffer[RX_BUFFER_SIZE];
-static volatile uint8_t rx_head = 0;
-static volatile uint8_t rx_tail = 0;
+/* Ring buffer for UART RX */
+static volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
+static volatile uint8_t rx_head = 0;    /* Write index (ISR writes here) */
+static volatile uint8_t rx_tail = 0;    /* Read index (main loop reads here) */
 
-/* Frame parsing state - use XDATA */
+/* Frame parsing state */
 static uint8_t frame_state = FRAME_IDLE;
-static uint8_t xdata frame_buffer[12];
+static uint8_t frame_buffer[12];        /* Max frame: 5A A5 len cmd addr[2] count data[4] */
 static uint8_t frame_idx = 0;
 static uint8_t frame_len = 0;
 
-/* Parsed frame data */
+/* Parsed frame data (set when complete frame received) */
 static volatile bit g_frame_ready = 0;
 static volatile uint16_t g_frame_addr = 0;
 static volatile uint16_t g_frame_value = 0;
@@ -82,10 +83,21 @@ static volatile uint16_t g_frame_value = 0;
 /*===========================================================================*/
 /* PWM Configuration                                                          */
 /*===========================================================================*/
-#define PWM_PERIOD          0x0456
+#define PWM_PERIOD          0x0456  /* PWM period value (~2.7kHz @ 24MHz/8) */
 
+/* PWM lookup table - indexed by brightness level (0-10) */
 static uint16_t code pwm_lut[11] = {
-    0, 99, 199, 299, 399, 499, 599, 699, 799, 899, 999
+    0,      /* Level 0: Off */
+    99,     /* Level 1: 16,000 Lux */
+    199,    /* Level 2: 32,000 Lux */
+    299,    /* Level 3: 48,000 Lux */
+    399,    /* Level 4: 64,000 Lux */
+    499,    /* Level 5: 80,000 Lux */
+    599,    /* Level 6: 96,000 Lux */
+    699,    /* Level 7: 112,000 Lux */
+    799,    /* Level 8: 128,000 Lux */
+    899,    /* Level 9: 144,000 Lux */
+    999     /* Level 10: 160,000 Lux (Full) */
 };
 
 /*===========================================================================*/
@@ -103,10 +115,12 @@ static uint16_t code pwm_lut[11] = {
 /*===========================================================================*/
 /* State Variables                                                            */
 /*===========================================================================*/
-static bit g_power = 0;
-static uint8_t g_brightness = 7;
-static uint8_t g_cct = 3;
-static uint8_t g_prev_scr = 0;
+static bit g_power = 0;                 /* Power state (0=off, 1=on) */
+static uint8_t g_brightness = 7;        /* Current brightness (0-10) */
+static uint8_t g_cct = 3;               /* Current CCT level (0-10) */
+static uint8_t g_prev_scr = 0;          /* Previous screen status */
+
+/* IR data buffer */
 static uint8_t ir_data[IR_DATA_LEN];
 
 /*===========================================================================*/
@@ -134,42 +148,70 @@ void UART0_ISR(void) interrupt 4
     if (RI)
     {
         uint8_t next_head;
+        
+        /* Store received byte in ring buffer */
         next_head = (rx_head + 1) & RX_BUFFER_MASK;
         
+        /* Check for buffer overflow */
         if (next_head != rx_tail)
         {
             rx_buffer[rx_head] = SBUF;
             rx_head = next_head;
         }
-        RI = 0;
+        /* else: buffer full, discard byte */
+        
+        RI = 0;  /* Clear receive interrupt flag */
     }
     
     if (TI)
     {
-        TI = 0;
+        TI = 0;  /* Clear transmit interrupt flag (handled in Send_Data) */
     }
 }
 
 /*===========================================================================*/
 /* Ring Buffer Helper Functions                                               */
 /*===========================================================================*/
+
+/**
+ * @brief Check if data available in RX buffer
+ * @return 1 if data available, 0 if empty
+ */
 static uint8_t rx_available(void)
 {
     return (rx_head != rx_tail);
 }
 
+/**
+ * @brief Read one byte from RX buffer (non-blocking)
+ * @return Byte read, or 0 if empty
+ */
 static uint8_t rx_read(void)
 {
-    uint8_t d;
-    if (rx_head == rx_tail) return 0;
-    d = rx_buffer[rx_tail];
+    uint8_t data;
+    
+    if (rx_head == rx_tail) return 0;  /* Empty */
+    
+    data = rx_buffer[rx_tail];
     rx_tail = (rx_tail + 1) & RX_BUFFER_MASK;
-    return d;
+    
+    return data;
 }
 
 /*===========================================================================*/
-/* DWIN Frame Parser                                                          */
+/* DWIN Frame Parser - State Machine                                          */
 /*===========================================================================*/
+
+/**
+ * @brief Process incoming bytes and parse DWIN frames
+ * @note Called from main loop, processes all available bytes
+ * 
+ * DWIN Auto-upload frame format:
+ *   5A A5 [len] [cmd] [addr_h] [addr_l] [count] [data_h] [data_l]
+ *   
+ * Example: Touch slider at 0x1100, value 5
+ *   5A A5 06 83 11 00 01 00 05
+ */
 static void process_DWIN_Frames(void)
 {
     uint8_t byte;
@@ -197,43 +239,56 @@ static void process_DWIN_Frames(void)
                 }
                 else if (byte == DWIN_HEADER_H)
                 {
+                    /* Stay in GOT_5A state, might be new frame */
                     frame_idx = 0;
                     frame_buffer[frame_idx++] = byte;
                 }
                 else
                 {
-                    frame_state = FRAME_IDLE;
+                    frame_state = FRAME_IDLE;  /* Invalid, reset */
                 }
                 break;
                 
             case FRAME_GOT_A5:
+                /* This byte is the length */
                 frame_len = byte;
                 frame_buffer[frame_idx++] = byte;
-                if (frame_len > 0 && frame_len <= 9)
+                
+                if (frame_len > 0 && frame_len <= 9)  /* Valid length range */
                 {
                     frame_state = FRAME_RECEIVING;
                 }
                 else
                 {
-                    frame_state = FRAME_IDLE;
+                    frame_state = FRAME_IDLE;  /* Invalid length */
                 }
                 break;
                 
             case FRAME_RECEIVING:
                 frame_buffer[frame_idx++] = byte;
-                if (frame_idx >= (3 + frame_len))
+                
+                /* Check if we have received all data bytes */
+                /* frame_len bytes after the length byte itself */
+                if (frame_idx >= (3 + frame_len))  /* 3 = header(2) + len(1) */
                 {
+                    /* Complete frame received! */
                     uint8_t cmd = frame_buffer[3];
+                    
                     if (cmd == DWIN_CMD_READ_RESP || cmd == DWIN_CMD_WRITE)
                     {
+                        /* Extract address and value */
+                        /* Format: [cmd] [addr_h] [addr_l] [count] [data_h] [data_l] */
                         g_frame_addr = ((uint16_t)frame_buffer[4] << 8) | frame_buffer[5];
-                        if (frame_len >= 5)
+                        
+                        /* Data starts at index 7 (after count byte at index 6) */
+                        if (frame_len >= 5)  /* At least cmd+addr+count+data */
                         {
                             g_frame_value = ((uint16_t)frame_buffer[7] << 8) | frame_buffer[8];
                             g_frame_ready = 1;
                         }
                     }
-                    frame_state = FRAME_IDLE;
+                    
+                    frame_state = FRAME_IDLE;  /* Ready for next frame */
                 }
                 break;
                 
@@ -243,6 +298,7 @@ static void process_DWIN_Frames(void)
         }
     }
     
+    /* Process completed frame if available */
     if (g_frame_ready)
     {
         handle_DWIN_VP(g_frame_addr, g_frame_value);
@@ -251,8 +307,14 @@ static void process_DWIN_Frames(void)
 }
 
 /*===========================================================================*/
-/* DWIN VP Handler                                                            */
+/* DWIN VP Handler - Process auto-uploaded values                             */
 /*===========================================================================*/
+
+/**
+ * @brief Handle received VP value from DWIN display
+ * @param address VP address
+ * @param value VP value
+ */
 static void handle_DWIN_VP(uint16_t address, uint16_t value)
 {
     switch (address)
@@ -260,6 +322,7 @@ static void handle_DWIN_VP(uint16_t address, uint16_t value)
         case ADDR_POWER:
             if (value && !g_power)
             {
+                /* Power ON via touch */
                 g_power = 1;
                 g_brightness = 7;
                 g_cct = 3;
@@ -268,6 +331,7 @@ static void handle_DWIN_VP(uint16_t address, uint16_t value)
             }
             else if (!value && g_power)
             {
+                /* Power OFF via touch */
                 g_power = 0;
                 update_PWM();
             }
@@ -295,7 +359,7 @@ static void handle_DWIN_VP(uint16_t address, uint16_t value)
                 g_brightness = 6;
                 g_cct = 4;
                 update_PWM();
-                writeVP(ADDR_MEMONE, 0);
+                writeVP(ADDR_MEMONE, 0);  /* Clear flag */
                 sync_Display();
             }
             break;
@@ -311,21 +375,24 @@ static void handle_DWIN_VP(uint16_t address, uint16_t value)
             }
             break;
             
-        case ADDR_ENDO_MAX:
-            if (g_power && value == 1)  /* Endo mode */
+        case ADDR_ENDO:
+            if (g_power && value == 1)
             {
                 g_brightness = 1;
                 g_cct = 1;
                 update_PWM();
-                writeVP(ADDR_ENDO_MAX, 0);
+                writeVP(ADDR_ENDO, 0);
                 sync_Display();
             }
-            else if (g_power && value == 2)  /* Max mode */
+            break;
+            
+        case ADDR_MAX:
+            if (g_power && value == 2)
             {
                 g_brightness = MAX_BRIGHTNESS;
                 g_cct = MAX_CCT;
                 update_PWM();
-                writeVP(ADDR_ENDO_MAX, 0);
+                writeVP(ADDR_MAX, 0);
                 sync_Display();
             }
             break;
@@ -341,17 +408,24 @@ static void handle_DWIN_VP(uint16_t address, uint16_t value)
                 g_prev_scr = 0;
             }
             break;
+            
+        default:
+            /* Unknown address, ignore */
+            break;
     }
 }
 
 /*===========================================================================*/
 /* PWM Control Functions                                                      */
 /*===========================================================================*/
+
 static void set_White_Fast(uint8_t level)
 {
     uint16_t pwm_val;
+    
     level = (level > MAX_BRIGHTNESS) ? MAX_BRIGHTNESS : level;
     pwm_val = pwm_lut[level];
+    
     PWM1L = (uint8_t)(pwm_val);
     PWM1H = (uint8_t)(pwm_val >> 8);
     set_LOAD;
@@ -360,8 +434,10 @@ static void set_White_Fast(uint8_t level)
 static void set_Yellow_Fast(uint8_t level)
 {
     uint16_t pwm_val;
+    
     level = (level > MAX_CCT) ? MAX_CCT : level;
     pwm_val = pwm_lut[level];
+    
     set_SFRPAGE;
     PWM5L = (uint8_t)(pwm_val);
     PWM5H = (uint8_t)(pwm_val >> 8);
@@ -393,8 +469,9 @@ static void sync_Display(void)
 }
 
 /*===========================================================================*/
-/* DWIN Communication - TX Only                                               */
+/* DWIN Communication - TX Only (RX is interrupt-driven)                      */
 /*===========================================================================*/
+
 static void writeVP(uint16_t address, uint16_t value)
 {
     Send_Data_To_UART0(0x5A);
@@ -419,6 +496,7 @@ static void setPage(uint8_t page)
     Send_Data_To_UART0(0x01);
     Send_Data_To_UART0(0x00);
     Send_Data_To_UART0(page);
+    
     Timer3_Delay10us(500);
 }
 
@@ -431,12 +509,14 @@ static void writeScr(uint8_t value)
     Send_Data_To_UART0(0x00);
     Send_Data_To_UART0(0x82);
     Send_Data_To_UART0(value);
+    
     Timer3_Delay10us(10000);
 }
 
 /*===========================================================================*/
 /* IR Command Processing                                                      */
 /*===========================================================================*/
+
 static void process_IR(void)
 {
     uint8_t cmd, inv;
@@ -448,6 +528,7 @@ static void process_IR(void)
     cmd = ir_data[2];
     inv = ir_data[3];
     
+    /* Validate NEC protocol */
     if ((cmd ^ inv) != 0xFF) return;
     
     if (cmd == IR_CMD_POWER)
@@ -470,7 +551,7 @@ static void process_IR(void)
     }
     else if (!g_power)
     {
-        return;
+        return;  /* Ignore other commands when power off */
     }
     else if (cmd == IR_CMD_WHITE_UP)
     {
@@ -525,109 +606,7 @@ static void process_IR(void)
         sync_Display();
     }
     
-    Timer3_Delay10us(100);
+    Timer3_Delay10us(100);  /* Debounce */
 }
 
-/*===========================================================================*/
-/* Initialization Functions                                                   */
-/*===========================================================================*/
-static void GPIO_Init(void)
-{
-    Set_All_GPIO_Quasi_Mode;
-    
-    P06_Quasi_Mode;
-    P07_Input_Mode;
-    
-    P04_PushPull_Mode;
-    BuzzerPin = 0;
-    
-    P14_PushPull_Mode;
-    P15_PushPull_Mode;
-    
-    P05_Input_Mode;
-    Enable_INT_Port0;
-    Enable_BIT5_LowLevel_Trig;
-    Enable_BIT5_FallEdge_Trig;
-    ir_rx_setup(IR_USE_PIN_IT);
-}
-
-static void MODIFY_HIRC_24576(void)
-{
-    uint8_t hircmap0, hircmap1;
-    uint16_t trimvalue16bit;
-    
-    if ((PCON & SET_BIT4) == SET_BIT4)
-    {
-        hircmap0 = RCTRIM0;
-        hircmap1 = RCTRIM1;
-        trimvalue16bit = ((hircmap0 << 1) + (hircmap1 & 0x01));
-        trimvalue16bit = trimvalue16bit - 14;
-        hircmap1 = trimvalue16bit & 0x01;
-        hircmap0 = trimvalue16bit >> 1;
-        
-        TA = 0xAA;
-        TA = 0x55;
-        RCTRIM0 = hircmap0;
-        TA = 0xAA;
-        TA = 0x55;
-        RCTRIM1 = hircmap1;
-        
-        PCON &= CLR_BIT4;
-    }
-}
-
-static void UART_Init(void)
-{
-    MODIFY_HIRC_24576();
-    InitialUART0_Timer1(115200);
-    
-    ENABLE_UART0_INTERRUPT;   /* Enable Serial interrupt */
-    ENABLE_GLOBAL_INTERRUPT;   /* Enable global interrupts */
-}
-
-static void PWM_Init(void)
-{
-    PWM1_P14_OUTPUT_ENABLE;
-    PWM5_P15_OUTPUT_ENABLE;
-    PWM_IMDEPENDENT_MODE;
-    PWM_EDGE_TYPE;
-    set_CLRPWM;
-    PWM_CLOCK_FSYS;
-    PWM_CLOCK_DIV_8;
-    PWM_OUTPUT_ALL_NORMAL;
-    
-    PWMPL = (uint8_t)(PWM_PERIOD);
-    PWMPH = (uint8_t)(PWM_PERIOD >> 8);
-    
-    set_PWMRUN;
-}
-
-static void Beep(void)
-{
-    BuzzerPin = 1;
-    Timer3_Delay10us(200);
-    BuzzerPin = 0;
-}
-
-/*===========================================================================*/
-/* MAIN Function                                                              */
-/*===========================================================================*/
-void main(void)
-{
-    GPIO_Init();
-    Beep();
-    UART_Init();
-    PWM_Init();
-    
-    writeVP(ADDR_MEMONE, 0);
-    writeVP(ADDR_MEMTWO, 0);
-    writeVP(ADDR_ENDO_MAX, 0);
-    
-    update_PWM();
-    
-    while (1)
-    {
-        process_IR();
-        process_DWIN_Frames();
-    }
-}
+/*==========================================================
