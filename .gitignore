@@ -1,16 +1,17 @@
-# Keil uVision Build Output
-Objects/
-Listings/
+# Keil uVision Build Output (intermediate files)
 *.obj
 *.lst
 *.m51
 *.lnp
-*.hex
 *.build_log.htm
 *.SBR
 *.__i
+*.map
 
-# Keil uVision User Files (keep .uvproj and .uvprojx)
+# Keep HEX file for release - add manually with: git add -f Objects/*.hex
+# Objects/*.hex
+
+# Keil uVision User/Session Files
 *.uvgui.*
 *.uvguix.*
 *.uvopt
@@ -20,9 +21,8 @@ Listings/
 # Build logs
 build_log.txt
 build_output.txt
-*.LST
 
-# Nu-Link driver
+# Nu-Link driver config (regenerated)
 Nu_Link_8051_Driver.ini
 
 # Synology Drive conflict files
@@ -33,12 +33,11 @@ Nu_Link_8051_Driver.ini
 Thumbs.db
 desktop.ini
 
-# VS Code (optional - keep .vscode for settings)
-# .vscode/
-
-# Legacy/Archive folders (optional - uncomment to exclude)
-# Touch Controller program Keil (Legacy)/
-# BSP_Official/
+# Legacy/Archive folders
+Touch Controller program Keil (Legacy)/
+Touch Controller program Keil (Legacy).zip
+BSP_Official/
+Library/
 
 # Temporary files
 *.tmp
